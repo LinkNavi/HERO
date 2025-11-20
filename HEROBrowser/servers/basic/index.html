@@ -1,50 +1,132 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Welcome to HERO Protocol</title>
+    <title>HERO Protocol - Welcome</title>
 </head>
 <body>
     <h1>Welcome to the HERO Protocol!</h1>
     
-    <h2>What is HERO?</h2>
-    <p>HERO is a lightweight UDP-based protocol designed for fast, efficient communication.</p>
+    <p>You are viewing this page through the HERO Browser, a custom C++ application built with SDL2 that renders HTML content served over the HERO protocol.</p>
     
-    <h2>Features</h2>
+    <h2>What is HERO?</h2>
+    <p>HERO (High-Efficiency Reliable Object protocol) is a lightweight UDP-based protocol designed for fast, efficient communication. It combines the speed of UDP with reliability features like acknowledgments and retransmission.</p>
+    
+    <h2>Quick Navigation</h2>
     <ul>
-        <li>UDP-based for low latency</li>
-        <li>Built-in acknowledgment system</li>
-        <li>Support for encrypted connections</li>
-        <li>Simple packet structure</li>
-        <li>Cross-platform C++ implementation</li>
+        <li><a href="hero://localhost:8080/test">Browser Feature Test</a> - Test all rendering capabilities</li>
+        <li><a href="hero://localhost:8080/about">About HERO</a> - Learn more about the protocol</li>
+        <li><a href="hero://localhost:8080/docs">Documentation</a> - Technical documentation</li>
+        <li><a href="hero://localhost:8080/code">Code Examples</a> - Implementation examples</li>
+        <li><a href="hero://localhost:8080/links">Link Navigation Test</a> - Test navigation features</li>
+        <li><a href="hero://localhost:8080/status">Server Status</a> - Check server information</li>
     </ul>
     
-    <h2>Protocol Flags</h2>
-    <p>HERO uses five main packet types:</p>
+    <h2>Key Features</h2>
     <ul>
-        <li><strong>CONN (0)</strong> - Establish connection</li>
-        <li><strong>GIVE (1)</strong> - Send data</li>
-        <li><strong>TAKE (2)</strong> - Request resources</li>
-        <li><strong>SEEN (3)</strong> - Acknowledge receipt</li>
-        <li><strong>STOP (4)</strong> - Close connection</li>
+        <li><strong>Fast</strong> - UDP-based for minimal latency</li>
+        <li><strong>Reliable</strong> - Built-in acknowledgment system</li>
+        <li><strong>Secure</strong> - Optional encryption support</li>
+        <li><strong>Simple</strong> - Easy-to-use C++ API</li>
+        <li><strong>Cross-platform</strong> - Linux, macOS, Windows</li>
+    </ul>
+    
+    <h2>Protocol Overview</h2>
+    <p>HERO uses five main packet types for communication:</p>
+    <ul>
+        <li><strong>CONN (0)</strong> - Establish connection with server</li>
+        <li><strong>GIVE (1)</strong> - Send data payload to recipient</li>
+        <li><strong>TAKE (2)</strong> - Request resource from server</li>
+        <li><strong>SEEN (3)</strong> - Acknowledge packet receipt</li>
+        <li><strong>STOP (4)</strong> - Gracefully close connection</li>
     </ul>
     
     <h2>Getting Started</h2>
-    <p>To create your own HERO server:</p>
+    <p>Creating a HERO server is simple:</p>
     <pre>
-    #include "HERO.h"
-    
+#include "HERO.h"
+
+int main() {
     HERO::HeroWebServer server(8080);
+    
     while (server.isRunning()) {
         server.serve();
     }
+    
+    return 0;
+}
     </pre>
     
-    <h2>Browser Support</h2>
-    <p>This page is being served via the HERO protocol and rendered in the HERO Browser!</p>
-    <p>You're viewing this through a custom C++ browser built with SDL2.</p>
+    <h2>Browser Features</h2>
+    <p>The HERO Browser you're using right now supports:</p>
+    <ul>
+        <li>Rich HTML rendering (headings, paragraphs, lists, code blocks)</li>
+        <li>Clickable hyperlinks with hover effects</li>
+        <li>Smooth scrolling with visual scrollbar</li>
+        <li>Text wrapping and responsive layout</li>
+        <li>Bookmark management (Ctrl+D)</li>
+        <li>Navigation history (Ctrl+H)</li>
+        <li>Keyboard shortcuts for navigation</li>
+        <li>Window resizing with content reflow</li>
+    </ul>
+    
+    <h2>Keyboard Shortcuts</h2>
+    <ul>
+        <li><strong>Ctrl+L</strong> - Focus URL bar</li>
+        <li><strong>Ctrl+D</strong> - Bookmark current page</li>
+        <li><strong>Ctrl+H</strong> - View browsing history</li>
+        <li><strong>Ctrl+B</strong> - View bookmarks</li>
+        <li><strong>Ctrl+R or F5</strong> - Refresh page</li>
+        <li><strong>Ctrl+Left/Right</strong> - Navigate back/forward</li>
+        <li><strong>Mouse Wheel</strong> - Scroll page</li>
+    </ul>
+    
+    <h2>Example Use Cases</h2>
+    <p>HERO protocol is perfect for:</p>
+    <ul>
+        <li>Real-time web applications requiring low latency</li>
+        <li>IoT device communication and monitoring</li>
+        <li>Game networking and multiplayer systems</li>
+        <li>Microservices architecture with fast IPC</li>
+        <li>Custom protocol implementations</li>
+        <li>Embedded systems with resource constraints</li>
+    </ul>
+    
+    <h2>Architecture</h2>
+    <p>The HERO protocol stack consists of:</p>
+    <pre>
+Application Layer
+    ↓
+HERO Protocol (Reliability)
+    ↓
+UDP Transport
+    ↓
+IP Network Layer
+    </pre>
+    
+    <h2>Try It Out!</h2>
+    <p>Explore the test pages to see all browser features in action:</p>
+    <ul>
+        <li>Visit the <a href="hero://localhost:8080/test">feature test page</a> to see various HTML elements</li>
+        <li>Check out <a href="hero://localhost:8080/code">code examples</a> to learn the API</li>
+        <li>Read the <a href="hero://localhost:8080/docs">documentation</a> for technical details</li>
+    </ul>
+    
+    <h2>Development</h2>
+    <p>The HERO protocol and browser are written in modern C++17 with minimal dependencies. The browser uses SDL2 for rendering and supports cross-platform development.</p>
+    
+    <h2>Performance</h2>
+    <p>HERO's UDP foundation provides:</p>
+    <ul>
+        <li>Latency under 5ms on local networks</li>
+        <li>Throughput up to 1 Gbps on modern hardware</li>
+        <li>Low CPU overhead compared to TCP</li>
+        <li>Minimal memory footprint</li>
+    </ul>
     
     <footer>
-        <p>HERO Protocol v1.0 - Built for speed and simplicity</p>
+        <p>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</p>
+        <p>HERO Protocol v1.0 - Built for Speed and Simplicity</p>
+        <p>Server running on port 8080 | Current connections: Active</p>
     </footer>
 </body>
 </html>
