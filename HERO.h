@@ -9,6 +9,7 @@
 #include <chrono>
 #include <functional>
 
+#include <fstream>
 // Platform-specific socket includes
 #ifdef _WIN32
     #include <winsock2.h>
