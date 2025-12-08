@@ -219,6 +219,8 @@ public:
 class GameServer {
 private:
   HeroServer server;
+  HeroSocket fast_socket; // For receiving unreliable fast updates
+  uint16_t fast_port;
   std::unordered_map<std::string, Entity> entities;
   GameState state;
   uint32_t tick_count;
@@ -236,7 +238,11 @@ private:
   }
 
 public:
-  GameServer(uint16_t port) : server(port), tick_count(0) { server.start(); }
+  GameServer(uint16_t port) : server(port), fast_port(port), tick_count(0) {
+    server.start();
+    // Bind fast socket to same port for unreliable updates
+    fast_socket.bind(port);
+  }
 
   // Add or update an entity
   void setEntity(const Entity &entity) { entities[entity.id] = entity; }
@@ -250,7 +256,7 @@ public:
   // Remove an entity
   void removeEntity(const std::string &id) { entities.erase(id); }
 
-  // Broadcast entity state to all players
+  // Broadcast entity state to all players (with acknowledgement)
   void broadcastEntity(const std::string &entity_id) {
     auto it = entities.find(entity_id);
     if (it == entities.end())
@@ -260,6 +266,26 @@ public:
     for (const auto &[key, player] : players) {
       server.sendTo(data, player.host, player.port);
     }
+  }
+
+  // Fast broadcast entity (no acknowledgement - for frequent updates)
+  void broadcastEntityFast(const std::string &entity_id) {
+    auto it = entities.find(entity_id);
+    if (it == entities.end())
+      return;
+
+    std::string data = "FAST|ENTITY|" + it->second.serialize();
+    std::vector<uint8_t> bytes(data.begin(), data.end());
+    
+    for (const auto &[key, player] : players) {
+      fast_socket.send(bytes, player.host, player.port);
+    }
+  }
+
+  // Send fast unreliable message to specific player
+  void sendFast(const std::string &msg, const std::string &host, uint16_t port) {
+    std::vector<uint8_t> bytes(msg.begin(), msg.end());
+    fast_socket.send(bytes, host, port);
   }
 
   // Broadcast game state
@@ -294,6 +320,46 @@ public:
     if (tick_count % 5 == 0) {
       for (const auto &[id, entity] : entities) {
         broadcastEntity(id);
+      }
+    }
+  }
+
+  // Process fast unreliable messages (call frequently)
+  void pollFast(std::function<void(const std::string &, const std::string &,
+                                   const std::string &, uint16_t)>
+                    handler = nullptr) {
+    std::vector<uint8_t> buffer;
+    std::string from_host;
+    uint16_t from_port;
+
+    while (fast_socket.recv(buffer, from_host, from_port)) {
+      std::string msg(buffer.begin(), buffer.end());
+      
+      // Check if this is a fast message
+      if (!msg.starts_with("FAST|"))
+        continue;
+
+      msg = msg.substr(5); // Remove "FAST|" prefix
+      
+      size_t pipe = msg.find('|');
+      if (pipe == std::string::npos)
+        continue;
+
+      std::string cmd = msg.substr(0, pipe);
+      std::string data = msg.substr(pipe + 1);
+
+      // Find player by host/port
+      std::string client_key = makeClientKey(from_host, from_port);
+      std::string player_id;
+      for (const auto &[key, player] : players) {
+        if (player.host == from_host) {
+          player_id = player.player_id;
+          break;
+        }
+      }
+
+      if (handler && !player_id.empty()) {
+        handler(cmd, data, player_id, from_port);
       }
     }
   }
@@ -363,12 +429,15 @@ public:
 class GameClient {
 private:
   HeroClient client;
+  HeroSocket fast_socket; // For unreliable fast updates
+  std::string server_host;
+  uint16_t server_port;
   std::unordered_map<std::string, Entity> entities;
   GameState state;
   std::string player_id;
 
 public:
-  GameClient() {}
+  GameClient() : server_port(0) {}
 
   bool connect(const std::string &host, uint16_t port,
                const std::string &player_name) {
@@ -376,6 +445,8 @@ public:
       return false;
     }
 
+    server_host = host;
+    server_port = port;
     player_id = player_name;
     client.send("JOIN|" + player_name);
     return true;
@@ -386,9 +457,26 @@ public:
     client.disconnect();
   }
 
-  // Send a command to the server
+  // Send a command to the server (with acknowledgement)
   void sendCommand(const std::string &cmd, const std::string &data = "") {
     client.send(cmd + "|" + data);
+  }
+
+  // Send fast unreliable data (no acknowledgement - for position updates)
+  void sendFast(const std::string &cmd, const std::string &data = "") {
+    std::string msg = "FAST|" + cmd + "|" + data;
+    std::vector<uint8_t> bytes(msg.begin(), msg.end());
+    fast_socket.send(bytes, server_host, server_port);
+  }
+
+  // Convenience: Send position update (fast, no ack)
+  void sendPosition(const Vector2 &pos) {
+    sendFast("POS", pos.toString());
+  }
+
+  // Convenience: Send velocity update (fast, no ack)
+  void sendVelocity(const Vector2 &vel) {
+    sendFast("VEL", vel.toString());
   }
 
   // Update and receive messages
