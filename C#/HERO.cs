@@ -12,23 +12,236 @@ namespace HERO
     // Protocol version
     public static class Protocol
     {
-        public const byte VERSION = 1;
+        public const byte VERSION = 2;
         public const int MAX_PACKET_SIZE = 65507;
+        public const int MAX_PAYLOAD_SIZE = 60000; // Safe size for fragmentation
         public const int DEFAULT_TIMEOUT_MS = 5000;
         public const int MAX_RETRIES = 3;
+        public const int FRAGMENT_HEADER_SIZE = 12;
     }
 
     // Protocol flags
     public enum Flag : byte
     {
-        CONN = 0, // Start connection (requires client public key)
-        GIVE = 1, // Send data (requires recipient key + payload)
-        TAKE = 2, // Request data/resources
-        SEEN = 3, // Acknowledge packet receipt
-        STOP = 4  // Close connection
+        CONN = 0,  // Start connection (requires client public key)
+        GIVE = 1,  // Send data (requires recipient key + payload)
+        TAKE = 2,  // Request data/resources
+        SEEN = 3,  // Acknowledge packet receipt
+        STOP = 4,  // Close connection
+        FRAG = 5,  // Fragmented packet
+        PING = 6,  // Keepalive ping
+        PONG = 7   // Keepalive response
     }
 
-    // Packet class
+    // Magic word helper for game commands
+    public static class MagicWords
+    {
+        // Common game commands as short byte codes for efficiency
+        public const string MOVE = "MV";
+        public const string ATTACK = "ATK";
+        public const string JUMP = "JMP";
+        public const string SHOOT = "SHT";
+        public const string INTERACT = "INT";
+        public const string CHAT = "CHT";
+        public const string SPAWN = "SPN";
+        public const string DEATH = "DTH";
+        public const string DAMAGE = "DMG";
+        public const string HEAL = "HEL";
+        public const string PICKUP = "PKP";
+        public const string DROP = "DRP";
+        public const string USE = "USE";
+        public const string EQUIP = "EQP";
+        public const string CAST = "CST";
+
+        // State sync
+        public const string STATE_FULL = "SF";
+        public const string STATE_DELTA = "SD";
+        public const string ENTITY_UPDATE = "EU";
+        public const string ENTITY_CREATE = "EC";
+        public const string ENTITY_DESTROY = "ED";
+
+        // Matchmaking
+        public const string JOIN_ROOM = "JR";
+        public const string LEAVE_ROOM = "LR";
+        public const string ROOM_READY = "RR";
+        public const string GAME_START = "GS";
+        public const string GAME_END = "GE";
+
+        private static Dictionary<string, string> customWords = new Dictionary<string, string>();
+
+        public static void Register(string word, string code)
+        {
+            if (code.Length != 2)
+                throw new ArgumentException("Magic word codes must be exactly 2 characters");
+            customWords[word] = code;
+        }
+
+        public static string Get(string word)
+        {
+            return customWords.ContainsKey(word) ? customWords[word] : word;
+        }
+
+        public static byte[] Encode(string word, params object[] args)
+        {
+            string code = Get(word);
+            List<byte> data = new List<byte>(Encoding.UTF8.GetBytes(code));
+            data.Add((byte)'|');
+            
+            foreach (var arg in args)
+            {
+                string str = arg.ToString();
+                data.AddRange(Encoding.UTF8.GetBytes(str));
+                data.Add((byte)';');
+            }
+            
+            return data.ToArray();
+        }
+
+        public static Tuple<string, List<string>> Decode(byte[] data)
+        {
+            string str = Encoding.UTF8.GetString(data);
+            int pipe = str.IndexOf('|');
+            
+            if (pipe == -1)
+                return new Tuple<string, List<string>>(str, new List<string>());
+            
+            string code = str.Substring(0, pipe);
+            string args_str = str.Substring(pipe + 1);
+            List<string> args = new List<string>(args_str.Split(new char[] { ';' }, StringSplitOptions.RemoveEmptyEntries));
+            
+            return new Tuple<string, List<string>>(code, args);
+        }
+    }
+
+    // Fragment manager for large packets
+    public class FragmentManager
+    {
+        private class FragmentedMessage
+        {
+            public ushort msg_id;
+            public ushort total_fragments;
+            public Dictionary<ushort, byte[]> fragments;
+            public DateTime last_update;
+
+            public FragmentedMessage(ushort id, ushort total)
+            {
+                msg_id = id;
+                total_fragments = total;
+                fragments = new Dictionary<ushort, byte[]>();
+                last_update = DateTime.Now;
+            }
+
+            public bool IsComplete()
+            {
+                return fragments.Count == total_fragments;
+            }
+
+            public byte[] Reassemble()
+            {
+                if (!IsComplete())
+                    return null;
+
+                List<byte> result = new List<byte>();
+                for (ushort i = 0; i < total_fragments; i++)
+                {
+                    if (!fragments.ContainsKey(i))
+                        return null;
+                    result.AddRange(fragments[i]);
+                }
+                return result.ToArray();
+            }
+        }
+
+        private Dictionary<ushort, FragmentedMessage> messages;
+        private ushort next_msg_id;
+
+        public FragmentManager()
+        {
+            messages = new Dictionary<ushort, FragmentedMessage>();
+            next_msg_id = 0;
+        }
+
+        public List<Packet> Fragment(byte[] data, Flag flag)
+        {
+            List<Packet> packets = new List<Packet>();
+            int chunk_size = Protocol.MAX_PAYLOAD_SIZE - Protocol.FRAGMENT_HEADER_SIZE;
+            ushort total_fragments = (ushort)((data.Length + chunk_size - 1) / chunk_size);
+            ushort msg_id = next_msg_id++;
+
+            for (ushort i = 0; i < total_fragments; i++)
+            {
+                int offset = i * chunk_size;
+                int length = Math.Min(chunk_size, data.Length - offset);
+                
+                List<byte> fragment_data = new List<byte>();
+                fragment_data.AddRange(BitConverter.GetBytes(msg_id));
+                fragment_data.AddRange(BitConverter.GetBytes(i));
+                fragment_data.AddRange(BitConverter.GetBytes(total_fragments));
+                fragment_data.Add((byte)flag);
+                
+                byte[] chunk = new byte[length];
+                Array.Copy(data, offset, chunk, 0, length);
+                fragment_data.AddRange(chunk);
+
+                Packet pkt = new Packet(Flag.FRAG, i, new List<byte>(), fragment_data);
+                packets.Add(pkt);
+            }
+
+            return packets;
+        }
+
+        public Tuple<bool, byte[], Flag> AddFragment(Packet pkt)
+        {
+            if (pkt.flag != (byte)Flag.FRAG || pkt.payload.Count < Protocol.FRAGMENT_HEADER_SIZE)
+                return new Tuple<bool, byte[], Flag>(false, null, Flag.GIVE);
+
+            byte[] payload = pkt.payload.ToArray();
+            ushort msg_id = BitConverter.ToUInt16(payload, 0);
+            ushort frag_num = BitConverter.ToUInt16(payload, 2);
+            ushort total_frags = BitConverter.ToUInt16(payload, 4);
+            Flag original_flag = (Flag)payload[6];
+
+            if (!messages.ContainsKey(msg_id))
+            {
+                messages[msg_id] = new FragmentedMessage(msg_id, total_frags);
+            }
+
+            byte[] fragment_data = new byte[payload.Length - 7];
+            Array.Copy(payload, 7, fragment_data, 0, fragment_data.Length);
+            messages[msg_id].fragments[frag_num] = fragment_data;
+            messages[msg_id].last_update = DateTime.Now;
+
+            if (messages[msg_id].IsComplete())
+            {
+                byte[] complete = messages[msg_id].Reassemble();
+                messages.Remove(msg_id);
+                return new Tuple<bool, byte[], Flag>(true, complete, original_flag);
+            }
+
+            return new Tuple<bool, byte[], Flag>(false, null, original_flag);
+        }
+
+        public void CleanupStale(int timeout_seconds = 30)
+        {
+            var now = DateTime.Now;
+            var to_remove = new List<ushort>();
+
+            foreach (var kvp in messages)
+            {
+                if ((now - kvp.Value.last_update).TotalSeconds > timeout_seconds)
+                {
+                    to_remove.Add(kvp.Key);
+                }
+            }
+
+            foreach (var id in to_remove)
+            {
+                messages.Remove(id);
+            }
+        }
+    }
+
+    // Packet class with compression support
     public class Packet
     {
         public byte flag;
@@ -137,13 +350,23 @@ namespace HERO
             return new Packet(Flag.STOP, seq, new List<byte>(), new List<byte>());
         }
 
+        public static Packet MakePing(ushort seq)
+        {
+            return new Packet(Flag.PING, seq, new List<byte>(), new List<byte>());
+        }
+
+        public static Packet MakePong(ushort seq)
+        {
+            return new Packet(Flag.PONG, seq, new List<byte>(), new List<byte>());
+        }
+
         public bool IsValid()
         {
-            return flag <= (byte)Flag.STOP && version == Protocol.VERSION;
+            return flag <= (byte)Flag.PONG && version == Protocol.VERSION;
         }
     }
 
-    // Socket wrapper
+    // Socket wrapper with improved error handling
     public class HeroSocket
     {
         private UdpClient socket;
@@ -201,7 +424,7 @@ namespace HERO
         }
     }
 
-    // Client implementation
+    // Enhanced client with automatic fragmentation and reconnection
     public class HeroClient
     {
         private HeroSocket socket;
@@ -209,6 +432,9 @@ namespace HERO
         private string server_host;
         private ushort server_port;
         private bool connected;
+        private FragmentManager fragment_mgr;
+        private DateTime last_ping;
+        private int ping_ms;
 
         public HeroClient()
         {
@@ -216,6 +442,9 @@ namespace HERO
             seq_num = 0;
             server_port = 0;
             connected = false;
+            fragment_mgr = new FragmentManager();
+            last_ping = DateTime.Now;
+            ping_ms = 0;
         }
 
         public bool Connect(string host, ushort port, List<byte> pubkey = null)
@@ -251,6 +480,7 @@ namespace HERO
                         if (pkt.flag == (byte)Flag.SEEN)
                         {
                             connected = true;
+                            last_ping = DateTime.Now;
                             return true;
                         }
                     }
@@ -260,6 +490,32 @@ namespace HERO
             }
 
             return false;
+        }
+
+        public bool SendLarge(List<byte> data, List<byte> recipient_key = null)
+        {
+            if (!connected)
+                return false;
+
+            if (data.Count <= Protocol.MAX_PAYLOAD_SIZE)
+            {
+                return Send(data, recipient_key);
+            }
+
+            // Fragment large messages
+            var fragments = fragment_mgr.Fragment(data.ToArray(), Flag.GIVE);
+            bool all_sent = true;
+
+            foreach (var frag in fragments)
+            {
+                if (!socket.Send(frag.Serialize(), server_host, server_port))
+                {
+                    all_sent = false;
+                }
+                Thread.Sleep(1); // Small delay between fragments
+            }
+
+            return all_sent;
         }
 
         public bool Send(List<byte> data, List<byte> recipient_key = null)
@@ -279,13 +535,57 @@ namespace HERO
             return Send(new List<byte>(Encoding.UTF8.GetBytes(text)), recipient_key);
         }
 
+        public bool SendCommand(string command, params object[] args)
+        {
+            byte[] data = MagicWords.Encode(command, args);
+            return Send(new List<byte>(data));
+        }
+
         public bool Ping()
         {
             if (!connected)
                 return false;
 
-            var pkt = Packet.MakeTake(seq_num++);
-            return socket.Send(pkt.Serialize(), server_host, server_port);
+            var ping_start = DateTime.Now;
+            var pkt = Packet.MakePing(seq_num++);
+            
+            if (!socket.Send(pkt.Serialize(), server_host, server_port))
+                return false;
+
+            // Wait for PONG
+            var start = DateTime.Now;
+            while ((DateTime.Now - start).TotalMilliseconds < 1000)
+            {
+                byte[] buffer;
+                string from_host;
+                ushort from_port;
+
+                if (socket.Recv(out buffer, out from_host, out from_port))
+                {
+                    try
+                    {
+                        var response = Packet.Deserialize(buffer);
+                        if (response.flag == (byte)Flag.PONG)
+                        {
+                            ping_ms = (int)(DateTime.Now - ping_start).TotalMilliseconds;
+                            last_ping = DateTime.Now;
+                            return true;
+                        }
+                    }
+                    catch { }
+                }
+                Thread.Sleep(1);
+            }
+
+            return false;
+        }
+
+        public void KeepAlive()
+        {
+            if ((DateTime.Now - last_ping).TotalSeconds > 5)
+            {
+                Ping();
+            }
         }
 
         public bool Receive(out Packet out_packet, int timeout_ms = 100)
@@ -303,17 +603,51 @@ namespace HERO
                 {
                     try
                     {
-                        out_packet = Packet.Deserialize(buffer);
+                        var pkt = Packet.Deserialize(buffer);
+
+                        // Handle fragments
+                        if (pkt.flag == (byte)Flag.FRAG)
+                        {
+                            var result = fragment_mgr.AddFragment(pkt);
+                            if (result.Item1)
+                            {
+                                // Fragment complete, reconstruct packet
+                                out_packet = new Packet(result.Item3, pkt.seq, new List<byte>(), new List<byte>(result.Item2));
+                                var seen = Packet.MakeSeen(out_packet.seq);
+                                socket.Send(seen.Serialize(), from_host, from_port);
+                                return true;
+                            }
+                            continue; // Wait for more fragments
+                        }
 
                         // Send SEEN acknowledgment
-                        var seen = Packet.MakeSeen(out_packet.seq);
-                        socket.Send(seen.Serialize(), from_host, from_port);
+                        var seen_pkt = Packet.MakeSeen(pkt.seq);
+                        socket.Send(seen_pkt.Serialize(), from_host, from_port);
 
+                        out_packet = pkt;
                         return true;
                     }
                     catch { }
                 }
                 Thread.Sleep(1);
+            }
+            
+            fragment_mgr.CleanupStale();
+            return false;
+        }
+
+        public bool ReceiveCommand(out string command, out List<string> args, int timeout_ms = 100)
+        {
+            command = "";
+            args = new List<string>();
+            
+            Packet pkt;
+            if (Receive(out pkt, timeout_ms))
+            {
+                var decoded = MagicWords.Decode(pkt.payload.ToArray());
+                command = decoded.Item1;
+                args = decoded.Item2;
+                return true;
             }
             return false;
         }
@@ -344,14 +678,20 @@ namespace HERO
         {
             return connected;
         }
+
+        public int GetPing()
+        {
+            return ping_ms;
+        }
     }
 
-    // Server implementation
+    // Enhanced server with automatic fragmentation
     public class HeroServer
     {
         private HeroSocket socket;
         private ushort port;
         private bool running;
+        private FragmentManager fragment_mgr;
 
         private class Client
         {
@@ -359,6 +699,7 @@ namespace HERO
             public ushort port;
             public List<byte> pubkey;
             public DateTime last_seen;
+            public DateTime last_ping;
         }
 
         private Dictionary<string, Client> clients;
@@ -374,6 +715,7 @@ namespace HERO
             running = false;
             clients = new Dictionary<string, Client>();
             socket = new HeroSocket();
+            fragment_mgr = new FragmentManager();
             socket.Bind(port);
         }
 
@@ -403,41 +745,62 @@ namespace HERO
                     var pkt = Packet.Deserialize(buffer);
                     string client_key = MakeClientKey(from_host, from_port);
 
+                    // Handle fragments
+                    if (pkt.flag == (byte)Flag.FRAG)
+                    {
+                        var result = fragment_mgr.AddFragment(pkt);
+                        if (result.Item1)
+                        {
+                            // Reconstruct original packet
+                            pkt = new Packet(result.Item3, pkt.seq, new List<byte>(), new List<byte>(result.Item2));
+                            var seen = Packet.MakeSeen(pkt.seq);
+                            socket.Send(seen.Serialize(), from_host, from_port);
+                        }
+                        else
+                        {
+                            return false; // Still waiting for more fragments
+                        }
+                    }
+
                     // Handle different packet types
                     if (pkt.flag == (byte)Flag.CONN)
                     {
-                        // New connection
                         Client c = new Client();
                         c.host = from_host;
                         c.port = from_port;
                         c.pubkey = pkt.requirements;
                         c.last_seen = DateTime.Now;
+                        c.last_ping = DateTime.Now;
                         clients[client_key] = c;
 
-                        // Send SEEN acknowledgment
                         var seen = Packet.MakeSeen(pkt.seq);
                         socket.Send(seen.Serialize(), from_host, from_port);
                     }
                     else if (pkt.flag == (byte)Flag.STOP)
                     {
-                        // Disconnect
                         clients.Remove(client_key);
                         var seen = Packet.MakeSeen(pkt.seq);
                         socket.Send(seen.Serialize(), from_host, from_port);
                     }
+                    else if (pkt.flag == (byte)Flag.PING)
+                    {
+                        if (clients.ContainsKey(client_key))
+                        {
+                            clients[client_key].last_ping = DateTime.Now;
+                        }
+                        var pong = Packet.MakePong(pkt.seq);
+                        socket.Send(pong.Serialize(), from_host, from_port);
+                    }
                     else
                     {
-                        // Update last seen
                         if (clients.ContainsKey(client_key))
                         {
                             clients[client_key].last_seen = DateTime.Now;
                         }
 
-                        // Send SEEN acknowledgment
                         var seen = Packet.MakeSeen(pkt.seq);
                         socket.Send(seen.Serialize(), from_host, from_port);
 
-                        // Call handler
                         if (handler != null)
                         {
                             handler(pkt, from_host, from_port);
@@ -449,18 +812,57 @@ namespace HERO
                 catch { }
             }
 
+            fragment_mgr.CleanupStale();
             return false;
         }
 
         public void SendTo(List<byte> data, string host, ushort port)
         {
-            var pkt = Packet.MakeGive(0, new List<byte>(), data);
-            socket.Send(pkt.Serialize(), host, port);
+            if (data.Count <= Protocol.MAX_PAYLOAD_SIZE)
+            {
+                var pkt = Packet.MakeGive(0, new List<byte>(), data);
+                socket.Send(pkt.Serialize(), host, port);
+            }
+            else
+            {
+                // Fragment large messages
+                var fragments = fragment_mgr.Fragment(data.ToArray(), Flag.GIVE);
+                foreach (var frag in fragments)
+                {
+                    socket.Send(frag.Serialize(), host, port);
+                    Thread.Sleep(1);
+                }
+            }
         }
 
         public void SendTo(string text, string host, ushort port)
         {
             SendTo(new List<byte>(Encoding.UTF8.GetBytes(text)), host, port);
+        }
+
+        public void SendCommand(string command, string host, ushort port, params object[] args)
+        {
+            byte[] data = MagicWords.Encode(command, args);
+            SendTo(new List<byte>(data), host, port);
+        }
+
+        public void Broadcast(List<byte> data)
+        {
+            foreach (var kvp in clients)
+            {
+                SendTo(data, kvp.Value.host, kvp.Value.port);
+            }
+        }
+
+        public void Broadcast(string text)
+        {
+            Broadcast(new List<byte>(Encoding.UTF8.GetBytes(text)));
+        }
+
+        public void BroadcastCommand(string command, params object[] args)
+        {
+            byte[] data = MagicWords.Encode(command, args);
+            Broadcast(new List<byte>(data));
         }
 
         public void Reply(Packet original_pkt, List<byte> response_data, string client_host, ushort client_port)
@@ -473,6 +875,25 @@ namespace HERO
             SendTo(response_text, client_host, client_port);
         }
 
+        public void CleanupStaleClients(int timeout_seconds = 30)
+        {
+            var now = DateTime.Now;
+            var to_remove = new List<string>();
+
+            foreach (var kvp in clients)
+            {
+                if ((now - kvp.Value.last_seen).TotalSeconds > timeout_seconds)
+                {
+                    to_remove.Add(kvp.Key);
+                }
+            }
+
+            foreach (var key in to_remove)
+            {
+                clients.Remove(key);
+            }
+        }
+
         public int GetClientCount()
         {
             return clients.Count;
@@ -481,473 +902,6 @@ namespace HERO
         public bool IsRunning()
         {
             return running;
-        }
-    }
-
-    // Simple Web Server Extension
-    public class HeroWebServer
-    {
-        private HeroServer server;
-        private string root_dir;
-
-        private string GetMimeType(string path)
-        {
-            if (path.EndsWith(".html") || path.EndsWith(".htm"))
-                return "text/html";
-            if (path.EndsWith(".css"))
-                return "text/css";
-            if (path.EndsWith(".js"))
-                return "application/javascript";
-            if (path.EndsWith(".json"))
-                return "application/json";
-            if (path.EndsWith(".png"))
-                return "image/png";
-            if (path.EndsWith(".jpg") || path.EndsWith(".jpeg"))
-                return "image/jpeg";
-            if (path.EndsWith(".gif"))
-                return "image/gif";
-            if (path.EndsWith(".svg"))
-                return "image/svg+xml";
-            if (path.EndsWith(".txt"))
-                return "text/plain";
-            return "application/octet-stream";
-        }
-
-        private string ReadFile(string filepath)
-        {
-            try
-            {
-                return File.ReadAllText(filepath);
-            }
-            catch
-            {
-                return "";
-            }
-        }
-
-        private void SendResponse(string content, string mime_type, string host, ushort port)
-        {
-            string response = "HTTP/1.0 200 OK\r\n";
-            response += "Content-Type: " + mime_type + "\r\n";
-            response += "Content-Length: " + content.Length.ToString() + "\r\n\r\n";
-            response += content;
-
-            // Send in chunks if needed (max ~60KB per packet for safety)
-            const int CHUNK_SIZE = 60000;
-            for (int i = 0; i < response.Length; i += CHUNK_SIZE)
-            {
-                int len = Math.Min(CHUNK_SIZE, response.Length - i);
-                string chunk = response.Substring(i, len);
-                server.SendTo(chunk, host, port);
-            }
-        }
-
-        private void Send404(string host, ushort port)
-        {
-            string response = "HTTP/1.0 404 Not Found\r\n\r\n<h1>404 Not Found</h1>";
-            server.SendTo(response, host, port);
-        }
-
-        public HeroWebServer(ushort port, string root_directory = ".")
-        {
-            server = new HeroServer(port);
-            root_dir = root_directory;
-            server.Start();
-        }
-
-        public void Serve()
-        {
-            server.Poll((pkt, host, port) =>
-            {
-                string request = Encoding.UTF8.GetString(pkt.payload.ToArray());
-
-                // Parse GET request
-                if (request.StartsWith("GET "))
-                {
-                    int path_start = 4;
-                    int path_end = request.IndexOf(' ', path_start);
-                    if (path_end == -1)
-                        path_end = request.IndexOf('\r', path_start);
-                    if (path_end == -1)
-                        path_end = request.Length;
-
-                    string path = request.Substring(path_start, path_end - path_start);
-
-                    // Default to index.html
-                    if (path == "/" || path == "")
-                    {
-                        path = "/index.html";
-                    }
-
-                    // Security: prevent directory traversal
-                    if (path.Contains(".."))
-                    {
-                        Send404(host, port);
-                        return;
-                    }
-
-                    string filepath = root_dir + path;
-                    string content = ReadFile(filepath);
-
-                    if (content != "")
-                    {
-                        SendResponse(content, GetMimeType(path), host, port);
-                    }
-                    else
-                    {
-                        Send404(host, port);
-                    }
-                }
-            });
-        }
-
-        public bool IsRunning()
-        {
-            return server.IsRunning();
-        }
-    }
-
-    // Simple Web Client (Browser)
-    public class HeroBrowser
-    {
-        private HeroClient client;
-
-        public HeroBrowser()
-        {
-            client = new HeroClient();
-        }
-
-        public string Get(string host, ushort port, string path = "/")
-        {
-            if (!client.IsConnected())
-            {
-                if (!client.Connect(host, port))
-                {
-                    return "ERROR: Could not connect to server";
-                }
-            }
-
-            // Send GET request
-            string request = "GET " + path + " HTTP/1.0\r\n\r\n";
-            client.Send(request);
-
-            // Receive response (handle multiple chunks)
-            string full_response = "";
-            string chunk;
-
-            // Try to receive multiple chunks
-            for (int i = 0; i < 10; i++)
-            {
-                if (client.ReceiveString(out chunk, 1000))
-                {
-                    full_response += chunk;
-                }
-                else
-                {
-                    break;
-                }
-            }
-
-            // Extract body from HTTP response
-            int body_start = full_response.IndexOf("\r\n\r\n");
-            if (body_start != -1)
-            {
-                return full_response.Substring(body_start + 4);
-            }
-
-            return full_response;
-        }
-
-        public void Disconnect()
-        {
-            client.Disconnect();
-        }
-    }
-
-    // Dynamic Web Server with persistent connections and event support
-    public class HeroDynamicWebServer
-    {
-        private HeroServer server;
-        private string root_dir;
-
-        private class WebClient
-        {
-            public string host;
-            public ushort port;
-            public DateTime last_seen;
-            public string current_path;
-            public bool waiting_for_updates;
-        }
-
-        private Dictionary<string, WebClient> web_clients;
-        private Dictionary<string, Func<Dictionary<string, string>, string>> route_handlers;
-
-        private string MakeClientKey(string host, ushort port)
-        {
-            return host + ":" + port.ToString();
-        }
-
-        private string GetMimeType(string path)
-        {
-            if (path.EndsWith(".html") || path.EndsWith(".htm"))
-                return "text/html";
-            if (path.EndsWith(".css"))
-                return "text/css";
-            if (path.EndsWith(".js"))
-                return "application/javascript";
-            if (path.EndsWith(".json"))
-                return "application/json";
-            if (path.EndsWith(".png"))
-                return "image/png";
-            if (path.EndsWith(".jpg") || path.EndsWith(".jpeg"))
-                return "image/jpeg";
-            if (path.EndsWith(".gif"))
-                return "image/gif";
-            if (path.EndsWith(".svg"))
-                return "image/svg+xml";
-            if (path.EndsWith(".txt"))
-                return "text/plain";
-            return "application/octet-stream";
-        }
-
-        private string ReadFile(string filepath)
-        {
-            try
-            {
-                return File.ReadAllText(filepath);
-            }
-            catch
-            {
-                return "";
-            }
-        }
-
-        private Dictionary<string, string> ParseQueryString(string query)
-        {
-            var result = new Dictionary<string, string>();
-            var pairs = query.Split('&');
-
-            foreach (var pair in pairs)
-            {
-                var parts = pair.Split('=');
-                if (parts.Length == 2)
-                {
-                    result[parts[0]] = parts[1];
-                }
-            }
-            return result;
-        }
-
-        private void SendResponse(string content, string mime_type, string host, ushort port, string extra_headers = "")
-        {
-            string response = "HTTP/1.1 200 OK\r\n";
-            response += "Content-Type: " + mime_type + "\r\n";
-            response += "Content-Length: " + content.Length.ToString() + "\r\n";
-            if (extra_headers != "")
-            {
-                response += extra_headers;
-            }
-            response += "\r\n" + content;
-
-            const int CHUNK_SIZE = 60000;
-            for (int i = 0; i < response.Length; i += CHUNK_SIZE)
-            {
-                int len = Math.Min(CHUNK_SIZE, response.Length - i);
-                string chunk = response.Substring(i, len);
-                server.SendTo(chunk, host, port);
-            }
-        }
-
-        private void SendJSON(string json, string host, ushort port)
-        {
-            SendResponse(json, "application/json", host, port);
-        }
-
-        private void Send404(string host, ushort port)
-        {
-            string response = "HTTP/1.1 404 Not Found\r\n\r\n<h1>404 Not Found</h1>";
-            server.SendTo(response, host, port);
-        }
-
-        public HeroDynamicWebServer(ushort port, string root_directory = ".")
-        {
-            server = new HeroServer(port);
-            root_dir = root_directory;
-            web_clients = new Dictionary<string, WebClient>();
-            route_handlers = new Dictionary<string, Func<Dictionary<string, string>, string>>();
-            server.Start();
-        }
-
-        public void Route(string path, Func<Dictionary<string, string>, string> handler)
-        {
-            route_handlers[path] = handler;
-        }
-
-        public void PushToClient(string host, ushort port, string data)
-        {
-            string client_key = MakeClientKey(host, port);
-            if (web_clients.ContainsKey(client_key))
-            {
-                SendResponse(data, "text/event-stream", host, port,
-                           "Cache-Control: no-cache\r\nConnection: keep-alive\r\n");
-            }
-        }
-
-        public void Broadcast(string data)
-        {
-            foreach (var kvp in web_clients)
-            {
-                if (kvp.Value.waiting_for_updates)
-                {
-                    PushToClient(kvp.Value.host, kvp.Value.port, data);
-                    kvp.Value.waiting_for_updates = false;
-                }
-            }
-        }
-
-        public void BroadcastEvent(string event_name, string data)
-        {
-            string event_data = "event: " + event_name + "\ndata: " + data + "\n\n";
-            Broadcast(event_data);
-        }
-
-        public void Serve()
-        {
-            server.Poll((pkt, host, port) =>
-            {
-                string request = Encoding.UTF8.GetString(pkt.payload.ToArray());
-                string client_key = MakeClientKey(host, port);
-
-                // Track client
-                if (!web_clients.ContainsKey(client_key))
-                {
-                    WebClient wc = new WebClient();
-                    wc.host = host;
-                    wc.port = port;
-                    wc.last_seen = DateTime.Now;
-                    wc.waiting_for_updates = false;
-                    web_clients[client_key] = wc;
-                }
-                else
-                {
-                    web_clients[client_key].last_seen = DateTime.Now;
-                }
-
-                // Parse HTTP request
-                if (request.StartsWith("GET ") || request.StartsWith("POST "))
-                {
-                    bool is_post = request.StartsWith("POST ");
-                    int path_start = is_post ? 5 : 4;
-                    int path_end = request.IndexOf(' ', path_start);
-                    if (path_end == -1)
-                        path_end = request.IndexOf('\r', path_start);
-                    if (path_end == -1)
-                        path_end = request.Length;
-
-                    string full_path = request.Substring(path_start, path_end - path_start);
-
-                    // Split path and query string
-                    string path = full_path;
-                    string query = "";
-                    int q_pos = full_path.IndexOf('?');
-                    if (q_pos != -1)
-                    {
-                        path = full_path.Substring(0, q_pos);
-                        query = full_path.Substring(q_pos + 1);
-                    }
-
-                    var parameters = ParseQueryString(query);
-
-                    // Handle POST body
-                    if (is_post)
-                    {
-                        int body_start = request.IndexOf("\r\n\r\n");
-                        if (body_start != -1)
-                        {
-                            string body = request.Substring(body_start + 4);
-                            var body_params = ParseQueryString(body);
-                            foreach (var kvp in body_params)
-                            {
-                                parameters[kvp.Key] = kvp.Value;
-                            }
-                        }
-                    }
-
-                    web_clients[client_key].current_path = path;
-
-                    // Check for Server-Sent Events (SSE) connection
-                    if (path == "/events" || parameters.ContainsKey("stream"))
-                    {
-                        web_clients[client_key].waiting_for_updates = true;
-                        SendResponse("", "text/event-stream", host, port,
-                                   "Cache-Control: no-cache\r\nConnection: keep-alive\r\n");
-                        return;
-                    }
-
-                    // Check for dynamic route handler
-                    if (route_handlers.ContainsKey(path))
-                    {
-                        string response = route_handlers[path](parameters);
-                        SendResponse(response, "text/html", host, port);
-                        return;
-                    }
-
-                    // Default to index.html for root
-                    if (path == "/" || path == "")
-                    {
-                        path = "/index.html";
-                    }
-
-                    // Security: prevent directory traversal
-                    if (path.Contains(".."))
-                    {
-                        Send404(host, port);
-                        return;
-                    }
-
-                    // Serve static file
-                    string filepath = root_dir + path;
-                    string content = ReadFile(filepath);
-
-                    if (content != "")
-                    {
-                        SendResponse(content, GetMimeType(path), host, port);
-                    }
-                    else
-                    {
-                        Send404(host, port);
-                    }
-                }
-            });
-        }
-
-        public int GetClientCount()
-        {
-            return web_clients.Count;
-        }
-
-        public void CleanupStaleClients()
-        {
-            var now = DateTime.Now;
-            var to_remove = new List<string>();
-
-            foreach (var kvp in web_clients)
-            {
-                if ((now - kvp.Value.last_seen).TotalSeconds > 30)
-                {
-                    to_remove.Add(kvp.Key);
-                }
-            }
-
-            foreach (var key in to_remove)
-            {
-                web_clients.Remove(key);
-            }
-        }
-
-        public bool IsRunning()
-        {
-            return server.IsRunning();
         }
     }
 }
